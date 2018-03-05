@@ -1,10 +1,11 @@
 package api
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 	"github.com/smira/flag"
 	ctx "github.com/smira/aptly/context"
-	"net/http"
 )
 
 var context *ctx.AptlyContext
@@ -27,7 +28,47 @@ func Router(c *ctx.AptlyContext) http.Handler {
 	router.Use(gin.ErrorLogger())
 	router.Use(QueryContext())
 
+	if context.Flags().Lookup("no-lock").Value.Get().(bool) {
+		// We use a goroutine to count the number of
+		// concurrent requests. When no more requests are
+		// running, we close the database to free the lock.
+		requests := make(chan dbRequest)
+
+		go acquireDatabase(requests)
+
+		router.Use(func(c *gin.Context) {
+			var err error
+
+			errCh := make(chan error)
+			requests <- dbRequest{acquiredb, errCh}
+
+			err = <-errCh
+			if err != nil {
+				c.AbortWithError(500, err)
+				return
+			}
+
+			defer func() {
+				requests <- dbRequest{releasedb, errCh}
+				err = <-errCh
+				if err != nil {
+					c.AbortWithError(500, err)
+				}
+			}()
+
+			c.Next()
+		})
+
+	} else {
+		go cacheFlusher()
+	}
+
 	root := router.Group("/api")
+
+	{
+		root.GET("/version", apiVersion)
+	}
+
 	{
 		root.GET("/repos", apiReposList)
 		root.POST("/repos", apiReposCreate)
@@ -41,6 +82,12 @@ func Router(c *ctx.AptlyContext) http.Handler {
 
 		root.POST("/repos/:name/file/:dir/:file", apiReposPackageFromFile)
 		root.POST("/repos/:name/file/:dir", apiReposPackageFromDir)
+
+		root.POST("/repos/:name/snapshots", apiSnapshotsCreateFromRepository)
+	}
+
+	{
+		root.POST("/mirrors/:name/snapshots", apiSnapshotsCreateFromMirror)
 	}
 
 	{
@@ -58,6 +105,32 @@ func Router(c *ctx.AptlyContext) http.Handler {
 		root.GET("/files/:dir", apiFilesListFiles)
 		root.DELETE("/files/:dir", apiFilesDeleteDir)
 		root.DELETE("/files/:dir/:name", apiFilesDeleteFile)
+	}
+
+	{
+		root.GET("/publish", apiPublishList)
+		root.POST("/publish", apiPublishRepoOrSnapshot)
+		root.POST("/publish/:prefix", apiPublishRepoOrSnapshot)
+		root.PUT("/publish/:prefix/:distribution", apiPublishUpdateSwitch)
+		root.DELETE("/publish/:prefix/:distribution", apiPublishDrop)
+	}
+
+	{
+		root.GET("/snapshots", apiSnapshotsList)
+		root.POST("/snapshots", apiSnapshotsCreate)
+		root.PUT("/snapshots/:name", apiSnapshotsUpdate)
+		root.GET("/snapshots/:name", apiSnapshotsShow)
+		root.GET("/snapshots/:name/packages", apiSnapshotsSearchPackages)
+		root.DELETE("/snapshots/:name", apiSnapshotsDrop)
+		root.GET("/snapshots/:name/diff/:withSnapshot", apiSnapshotsDiff)
+	}
+
+	{
+		root.GET("/packages/:key", apiPackagesShow)
+	}
+
+	{
+		root.GET("/graph.:ext", apiGraph)
 	}
 
 	return router

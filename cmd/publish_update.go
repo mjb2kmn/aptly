@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+
 	"github.com/smira/aptly/deb"
 	"github.com/smira/commander"
 	"github.com/smira/flag"
@@ -29,7 +30,7 @@ func aptlyPublishUpdate(cmd *commander.Command, args []string) error {
 		return fmt.Errorf("unable to update: %s", err)
 	}
 
-	if published.SourceKind != "local" {
+	if published.SourceKind != deb.SourceLocalRepo {
 		return fmt.Errorf("unable to update: not a local repository publish")
 	}
 
@@ -54,6 +55,10 @@ func aptlyPublishUpdate(cmd *commander.Command, args []string) error {
 			"the same package pool.\n")
 	}
 
+	if context.Flags().IsSet("skip-contents") {
+		published.SkipContents = context.Flags().Lookup("skip-contents").Value.Get().(bool)
+	}
+
 	err = published.Publish(context.PackagePool(), context, context.CollectionFactory(), signer, context.Progress(), forceOverwrite)
 	if err != nil {
 		return fmt.Errorf("unable to publish: %s", err)
@@ -64,10 +69,13 @@ func aptlyPublishUpdate(cmd *commander.Command, args []string) error {
 		return fmt.Errorf("unable to save to DB: %s", err)
 	}
 
-	err = context.CollectionFactory().PublishedRepoCollection().CleanupPrefixComponentFiles(published.Prefix, components,
-		context.GetPublishedStorage(storage), context.CollectionFactory(), context.Progress())
-	if err != nil {
-		return fmt.Errorf("unable to update: %s", err)
+	skipCleanup := context.Flags().Lookup("skip-cleanup").Value.Get().(bool)
+	if !skipCleanup {
+		err = context.CollectionFactory().PublishedRepoCollection().CleanupPrefixComponentFiles(published.Prefix, components,
+			context.GetPublishedStorage(storage), context.CollectionFactory(), context.Progress())
+		if err != nil {
+			return fmt.Errorf("unable to update: %s", err)
+		}
 	}
 
 	context.Progress().Printf("\nPublish for local repo %s has been successfully updated.\n", published.String())
@@ -102,7 +110,9 @@ Example:
 	cmd.Flag.String("passphrase-file", "", "GPG passhprase-file for the key (warning: could be insecure)")
 	cmd.Flag.Bool("batch", false, "run GPG with detached tty")
 	cmd.Flag.Bool("skip-signing", false, "don't sign Release files with GPG")
+	cmd.Flag.Bool("skip-contents", false, "don't generate Contents indexes")
 	cmd.Flag.Bool("force-overwrite", false, "overwrite files in package pool in case of mismatch")
+	cmd.Flag.Bool("skip-cleanup", false, "don't remove unreferenced files in prefix/component")
 
 	return cmd
 }

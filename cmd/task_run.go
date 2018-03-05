@@ -18,13 +18,15 @@ func aptlyTaskRun(cmd *commander.Command, args []string) error {
 		var text string
 		cmdArgs := []string{}
 
-		if finfo, err := os.Stat(filename); os.IsNotExist(err) || finfo.IsDir() {
-			return fmt.Errorf("no such file, %s\n", filename)
+		var finfo os.FileInfo
+		if finfo, err = os.Stat(filename); os.IsNotExist(err) || finfo.IsDir() {
+			return fmt.Errorf("no such file, %s", filename)
 		}
 
-		fmt.Println("Reading file...\n")
+		fmt.Print("Reading file...\n\n")
 
-		file, err := os.Open(filename)
+		var file *os.File
+		file, err = os.Open(filename)
 
 		if err != nil {
 			return err
@@ -80,7 +82,7 @@ func aptlyTaskRun(cmd *commander.Command, args []string) error {
 
 	for i, command := range cmdList {
 		if !commandErrored {
-			err := context.ReOpenDatabase()
+			err = context.ReOpenDatabase()
 			if err != nil {
 				return fmt.Errorf("failed to reopen DB: %s", err)
 			}

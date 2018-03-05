@@ -1,10 +1,11 @@
 package query
 
 import (
-	"github.com/smira/aptly/deb"
 	"regexp"
 
-  . "gopkg.in/check.v1"
+	"github.com/smira/aptly/deb"
+
+	. "gopkg.in/check.v1"
 )
 
 type SyntaxSuite struct {
@@ -48,13 +49,25 @@ func (s *SyntaxSuite) TestParsing(c *C) {
 
 	c.Assert(err, IsNil)
 	c.Check(q, DeepEquals, &deb.DependencyQuery{Dep: deb.Dependency{Pkg: "package", Relation: deb.VersionRegexp, Version: "5\\.3.*~dev",
-		Regexp: regexp.MustCompile("5\\.3.*~dev")}})
+		Regexp: regexp.MustCompile(`5\.3.*~dev`)}})
 
 	l, _ = lex("query", "alien-data_1.3.4~dev_i386")
 	q, err = parse(l)
 
 	c.Assert(err, IsNil)
 	c.Check(q, DeepEquals, &deb.PkgQuery{Pkg: "alien-data", Version: "1.3.4~dev", Arch: "i386"})
+
+	l, _ = lex("query", "Alien-data_1.3.4~dev_i386")
+	q, err = parse(l)
+
+	c.Assert(err, IsNil)
+	c.Check(q, DeepEquals, &deb.PkgQuery{Pkg: "Alien-data", Version: "1.3.4~dev", Arch: "i386"})
+
+	l, _ = lex("query", "Name")
+	q, err = parse(l)
+
+	c.Assert(err, IsNil)
+	c.Check(q, DeepEquals, &deb.FieldQuery{Field: "Name"})
 
 	l, _ = lex("query", "package (> 5.3.7) {amd64}")
 	q, err = parse(l)

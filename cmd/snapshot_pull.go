@@ -2,12 +2,13 @@ package cmd
 
 import (
 	"fmt"
+	"sort"
+	"strings"
+
 	"github.com/smira/aptly/deb"
 	"github.com/smira/aptly/query"
 	"github.com/smira/commander"
 	"github.com/smira/flag"
-	"sort"
-	"strings"
 )
 
 func aptlySnapshotPull(cmd *commander.Command, args []string) error {
@@ -91,11 +92,11 @@ func aptlySnapshotPull(cmd *commander.Command, args []string) error {
 			return fmt.Errorf("unable to parse query: %s", err)
 		}
 		// Add architecture filter
-		queries[i] = &deb.AndQuery{queries[i], archQuery}
+		queries[i] = &deb.AndQuery{L: queries[i], R: archQuery}
 	}
 
 	// Filter with dependencies as requested
-	result, err := sourcePackageList.Filter(queries, !noDeps, packageList, context.DependencyOptions(), architecturesList)
+	result, err := sourcePackageList.FilterWithProgress(queries, !noDeps, packageList, context.DependencyOptions(), architecturesList, context.Progress())
 	if err != nil {
 		return fmt.Errorf("unable to pull: %s", err)
 	}

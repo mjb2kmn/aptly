@@ -2,9 +2,11 @@ package deb
 
 import (
 	"fmt"
+	"sort"
+	"strings"
+
 	"github.com/smira/aptly/aptly"
 	"github.com/smira/aptly/utils"
-	"sort"
 )
 
 // Dependency options
@@ -19,6 +21,8 @@ const (
 	DepFollowAllVariants
 	// DepFollowBuild pulls build dependencies
 	DepFollowBuild
+	// DepVerboseResolve emits additional logs while dependencies are being resolved
+	DepVerboseResolve
 )
 
 // PackageList is list of unique (by key) packages
@@ -30,12 +34,21 @@ const (
 type PackageList struct {
 	// Straight list of packages as map
 	packages map[string]*Package
-	// Has index been prepared?
-	indexed bool
 	// Indexed list of packages, sorted by name internally
 	packagesIndex []*Package
 	// Map of packages for each virtual package (provides)
 	providesIndex map[string][]*Package
+	// Package key generation function
+	keyFunc func(p *Package) string
+	// Allow duplicates?
+	duplicatesAllowed bool
+	// Has index been prepared?
+	indexed bool
+}
+
+// PackageConflictError means that package can't be added to the list due to error
+type PackageConflictError struct {
+	error
 }
 
 // Verify interface
@@ -44,9 +57,36 @@ var (
 	_ PackageCatalog = &PackageList{}
 )
 
-// NewPackageList creates empty package list
+func packageShortKey(p *Package) string {
+	return string(p.ShortKey(""))
+}
+
+func packageFullKey(p *Package) string {
+	return string(p.Key(""))
+}
+
+// NewPackageList creates empty package list without duplicate package
 func NewPackageList() *PackageList {
-	return &PackageList{packages: make(map[string]*Package, 1000)}
+	return NewPackageListWithDuplicates(false, 1000)
+}
+
+// NewPackageListWithDuplicates creates empty package list which might allow or block duplicate packages
+func NewPackageListWithDuplicates(duplicates bool, capacity int) *PackageList {
+	if capacity == 0 {
+		capacity = 1000
+	}
+
+	result := &PackageList{
+		packages:          make(map[string]*Package, capacity),
+		duplicatesAllowed: duplicates,
+		keyFunc:           packageShortKey,
+	}
+
+	if duplicates {
+		result.keyFunc = packageFullKey
+	}
+
+	return result
 }
 
 // NewPackageListFromRefList loads packages list from PackageRefList
@@ -56,7 +96,7 @@ func NewPackageListFromRefList(reflist *PackageRefList, collection *PackageColle
 		return NewPackageList(), nil
 	}
 
-	result := &PackageList{packages: make(map[string]*Package, reflist.Len())}
+	result := NewPackageListWithDuplicates(false, reflist.Len())
 
 	if progress != nil {
 		progress.InitBar(int64(reflist.Len()), false)
@@ -84,13 +124,21 @@ func NewPackageListFromRefList(reflist *PackageRefList, collection *PackageColle
 	return result, nil
 }
 
+// Has checks whether package is already in the list
+func (l *PackageList) Has(p *Package) bool {
+	key := l.keyFunc(p)
+	_, ok := l.packages[key]
+
+	return ok
+}
+
 // Add appends package to package list, additionally checking for uniqueness
 func (l *PackageList) Add(p *Package) error {
-	key := string(p.ShortKey(""))
+	key := l.keyFunc(p)
 	existing, ok := l.packages[key]
 	if ok {
 		if !existing.Equals(p) {
-			return fmt.Errorf("conflict in package %s", p)
+			return &PackageConflictError{fmt.Errorf("conflict in package %s", p)}
 		}
 		return nil
 	}
@@ -165,7 +213,7 @@ func (l *PackageList) Append(pl *PackageList) error {
 
 // Remove removes package from the list, and updates index when required
 func (l *PackageList) Remove(p *Package) {
-	delete(l.packages, string(p.ShortKey("")))
+	delete(l.packages, l.keyFunc(p))
 	if l.indexed {
 		for _, provides := range p.Provides {
 			for i, pkg := range l.providesIndex[provides] {
@@ -198,7 +246,7 @@ func (l *PackageList) Remove(p *Package) {
 func (l *PackageList) Architectures(includeSource bool) (result []string) {
 	result = make([]string, 0, 10)
 	for _, pkg := range l.packages {
-		if pkg.Architecture != "all" && (pkg.Architecture != "source" || includeSource) && !utils.StrSliceHasItem(result, pkg.Architecture) {
+		if pkg.Architecture != ArchitectureAll && (pkg.Architecture != ArchitectureSource || includeSource) && !utils.StrSliceHasItem(result, pkg.Architecture) {
 			result = append(result, pkg.Architecture)
 		}
 	}
@@ -212,7 +260,7 @@ func (l *PackageList) Strings() []string {
 
 	for _, p := range l.packages {
 		result[i] = string(p.Key(""))
-		i += 1
+		i++
 	}
 
 	return result
@@ -247,7 +295,7 @@ func depSliceDeduplicate(s []Dependency) []Dependency {
 
 // VerifyDependencies looks for missing dependencies in package list.
 //
-// Analysis would be peformed for each architecture, in specified sources
+// Analysis would be performed for each architecture, in specified sources
 func (l *PackageList) VerifyDependencies(options int, architectures []string, sources *PackageList, progress aptly.Progress) ([]Dependency, error) {
 	l.PrepareIndex()
 	missing := make([]Dependency, 0, 128)
@@ -309,6 +357,14 @@ func (l *PackageList) VerifyDependencies(options int, architectures []string, so
 		progress.ShutdownBar()
 	}
 
+	if options&DepVerboseResolve == DepVerboseResolve && progress != nil {
+		missingStr := make([]string, len(missing))
+		for i := range missing {
+			missingStr[i] = missing[i].String()
+		}
+		progress.ColoredPrintf("@{y}Missing dependencies:@| %s", strings.Join(missingStr, ", "))
+	}
+
 	return missing, nil
 }
 
@@ -360,7 +416,7 @@ func (l *PackageList) PrepareIndex() {
 
 // Scan searches package index using full scan
 func (l *PackageList) Scan(q PackageQuery) (result *PackageList) {
-	result = NewPackageList()
+	result = NewPackageListWithDuplicates(l.duplicatesAllowed, 0)
 	for _, pkg := range l.packages {
 		if q.Matches(pkg) {
 			result.Add(pkg)
@@ -377,7 +433,7 @@ func (l *PackageList) SearchSupported() bool {
 
 // SearchByKey looks up package by exact key reference
 func (l *PackageList) SearchByKey(arch, name, version string) (result *PackageList) {
-	result = NewPackageList()
+	result = NewPackageListWithDuplicates(l.duplicatesAllowed, 0)
 
 	pkg := l.packages["P"+arch+" "+name+" "+version]
 	if pkg != nil {
@@ -391,18 +447,6 @@ func (l *PackageList) SearchByKey(arch, name, version string) (result *PackageLi
 func (l *PackageList) Search(dep Dependency, allMatches bool) (searchResults []*Package) {
 	if !l.indexed {
 		panic("list not indexed, can't search")
-	}
-
-	if dep.Relation == VersionDontCare {
-		for _, p := range l.providesIndex[dep.Pkg] {
-			if dep.Architecture == "" || p.MatchesArchitecture(dep.Architecture) {
-				searchResults = append(searchResults, p)
-
-				if !allMatches {
-					break
-				}
-			}
-		}
 	}
 
 	i := sort.Search(len(l.packagesIndex), func(j int) bool { return l.packagesIndex[j].Name >= dep.Pkg })
@@ -420,11 +464,28 @@ func (l *PackageList) Search(dep Dependency, allMatches bool) (searchResults []*
 		i++
 	}
 
+	if dep.Relation == VersionDontCare {
+		for _, p := range l.providesIndex[dep.Pkg] {
+			if dep.Architecture == "" || p.MatchesArchitecture(dep.Architecture) {
+				searchResults = append(searchResults, p)
+
+				if !allMatches {
+					break
+				}
+			}
+		}
+	}
+
 	return
 }
 
 // Filter filters package index by specified queries (ORed together), possibly pulling dependencies
 func (l *PackageList) Filter(queries []PackageQuery, withDependencies bool, source *PackageList, dependencyOptions int, architecturesList []string) (*PackageList, error) {
+	return l.FilterWithProgress(queries, withDependencies, source, dependencyOptions, architecturesList, nil)
+}
+
+// FilterWithProgress filters package index by specified queries (ORed together), possibly pulling dependencies and displays progress
+func (l *PackageList) FilterWithProgress(queries []PackageQuery, withDependencies bool, source *PackageList, dependencyOptions int, architecturesList []string, progress aptly.Progress) (*PackageList, error) {
 	if !l.indexed {
 		panic("list not indexed, can't filter")
 	}
@@ -451,22 +512,37 @@ func (l *PackageList) Filter(queries []PackageQuery, withDependencies bool, sour
 			added = 0
 
 			// find missing dependencies
-			missing, err := result.VerifyDependencies(dependencyOptions, architecturesList, dependencySource, nil)
+			missing, err := result.VerifyDependencies(dependencyOptions, architecturesList, dependencySource, progress)
 			if err != nil {
 				return nil, err
 			}
 
 			// try to satisfy dependencies
 			for _, dep := range missing {
-				// dependency might have already been satisfied
-				// with packages already been added
-				if result.Search(dep, false) != nil {
-					continue
+				if dependencyOptions&DepFollowAllVariants == 0 {
+					// dependency might have already been satisfied
+					// with packages already been added
+					//
+					// when follow-all-variants is enabled, we need to try to expand anyway,
+					// as even if dependency is satisfied now, there might be other ways to satisfy dependency
+					if result.Search(dep, false) != nil {
+						if dependencyOptions&DepVerboseResolve == DepVerboseResolve && progress != nil {
+							progress.ColoredPrintf("@{y}Already satisfied dependency@|: %s with %s", &dep, result.Search(dep, true))
+						}
+						continue
+					}
 				}
 
-				searchResults := l.Search(dep, false)
-				if searchResults != nil {
+				searchResults := l.Search(dep, true)
+				if len(searchResults) > 0 {
 					for _, p := range searchResults {
+						if result.Has(p) {
+							continue
+						}
+
+						if dependencyOptions&DepVerboseResolve == DepVerboseResolve && progress != nil {
+							progress.ColoredPrintf("@{g}Injecting package@|: %s", p)
+						}
 						result.Add(p)
 						dependencySource.Add(p)
 						added++
@@ -474,6 +550,11 @@ func (l *PackageList) Filter(queries []PackageQuery, withDependencies bool, sour
 							break
 						}
 					}
+				} else {
+					if dependencyOptions&DepVerboseResolve == DepVerboseResolve && progress != nil {
+						progress.ColoredPrintf("@{r}Unsatisfied dependency@|: %s", dep.String())
+					}
+
 				}
 			}
 		}

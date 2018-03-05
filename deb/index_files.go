@@ -3,11 +3,14 @@ package deb
 import (
 	"bufio"
 	"fmt"
-	"github.com/smira/aptly/aptly"
-	"github.com/smira/aptly/utils"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/smira/aptly/aptly"
+	"github.com/smira/aptly/pgp"
+	"github.com/smira/aptly/utils"
 )
 
 type indexFiles struct {
@@ -18,17 +21,20 @@ type indexFiles struct {
 	tempDir          string
 	suffix           string
 	indexes          map[string]*indexFile
+	acquireByHash    bool
 }
 
 type indexFile struct {
-	parent       *indexFiles
-	discardable  bool
-	compressable bool
-	signable     bool
-	relativePath string
-	tempFilename string
-	tempFile     *os.File
-	w            *bufio.Writer
+	parent        *indexFiles
+	discardable   bool
+	compressable  bool
+	onlyGzip      bool
+	signable      bool
+	acquireByHash bool
+	relativePath  string
+	tempFilename  string
+	tempFile      *os.File
+	w             *bufio.Writer
 }
 
 func (file *indexFile) BufWriter() (*bufio.Writer, error) {
@@ -46,7 +52,7 @@ func (file *indexFile) BufWriter() (*bufio.Writer, error) {
 	return file.w, nil
 }
 
-func (file *indexFile) Finalize(signer utils.Signer) error {
+func (file *indexFile) Finalize(signer pgp.Signer) error {
 	if file.w == nil {
 		if file.discardable {
 			return nil
@@ -61,7 +67,7 @@ func (file *indexFile) Finalize(signer utils.Signer) error {
 	}
 
 	if file.compressable {
-		err = utils.CompressFile(file.tempFile)
+		err = utils.CompressFile(file.tempFile, file.onlyGzip)
 		if err != nil {
 			file.tempFile.Close()
 			return fmt.Errorf("unable to compress index file: %s", err)
@@ -73,6 +79,9 @@ func (file *indexFile) Finalize(signer utils.Signer) error {
 	exts := []string{""}
 	if file.compressable {
 		exts = append(exts, ".gz", ".bz2")
+		if file.onlyGzip {
+			exts = []string{".gz"}
+		}
 	}
 
 	for _, ext := range exts {
@@ -85,9 +94,20 @@ func (file *indexFile) Finalize(signer utils.Signer) error {
 		file.parent.generatedFiles[file.relativePath+ext] = checksumInfo
 	}
 
-	err = file.parent.publishedStorage.MkDir(filepath.Dir(filepath.Join(file.parent.basePath, file.relativePath)))
+	filedir := filepath.Dir(filepath.Join(file.parent.basePath, file.relativePath))
+
+	err = file.parent.publishedStorage.MkDir(filedir)
 	if err != nil {
 		return fmt.Errorf("unable to create dir: %s", err)
+	}
+
+	if file.acquireByHash {
+		for _, hash := range []string{"MD5Sum", "SHA1", "SHA256", "SHA512"} {
+			err = file.parent.publishedStorage.MkDir(filepath.Join(filedir, "by-hash", hash))
+			if err != nil {
+				return fmt.Errorf("unable to create dir: %s", err)
+			}
+		}
 	}
 
 	for _, ext := range exts {
@@ -100,6 +120,16 @@ func (file *indexFile) Finalize(signer utils.Signer) error {
 		if file.parent.suffix != "" {
 			file.parent.renameMap[filepath.Join(file.parent.basePath, file.relativePath+file.parent.suffix+ext)] =
 				filepath.Join(file.parent.basePath, file.relativePath+ext)
+		}
+
+		if file.acquireByHash {
+			sums := file.parent.generatedFiles[file.relativePath+ext]
+			for hash, sum := range map[string]string{"SHA512": sums.SHA512, "SHA256": sums.SHA256, "SHA1": sums.SHA1, "MD5Sum": sums.MD5} {
+				err = packageIndexByHash(file, ext, hash, sum)
+				if err != nil {
+					return fmt.Errorf("unable to build hash file: %s", err)
+				}
+			}
 		}
 	}
 
@@ -137,7 +167,57 @@ func (file *indexFile) Finalize(signer utils.Signer) error {
 	return nil
 }
 
-func newIndexFiles(publishedStorage aptly.PublishedStorage, basePath, tempDir, suffix string) *indexFiles {
+func packageIndexByHash(file *indexFile, ext string, hash string, sum string) error {
+	src := filepath.Join(file.parent.basePath, file.relativePath)
+	indexfile := path.Base(src + ext)
+	src = src + file.parent.suffix + ext
+	filedir := filepath.Dir(filepath.Join(file.parent.basePath, file.relativePath))
+	dst := filepath.Join(filedir, "by-hash", hash)
+	sumfilePath := filepath.Join(dst, sum)
+
+	// link already exists? do nothing
+	exists, err := file.parent.publishedStorage.FileExists(sumfilePath)
+	if err != nil {
+		return fmt.Errorf("Acquire-By-Hash: error checking exists of file %s: %s", sumfilePath, err)
+	}
+	if exists {
+		return nil
+	}
+
+	// create the link
+	err = file.parent.publishedStorage.HardLink(src, sumfilePath)
+	if err != nil {
+		return fmt.Errorf("Acquire-By-Hash: error creating hardlink %s: %s", sumfilePath, err)
+	}
+
+	// if a previous index file already exists exists, backup symlink
+	indexPath := filepath.Join(dst, indexfile)
+	oldIndexPath := filepath.Join(dst, indexfile+".old")
+	if exists, _ = file.parent.publishedStorage.FileExists(indexPath); exists {
+		// if exists, remove old symlink
+		if exists, _ = file.parent.publishedStorage.FileExists(oldIndexPath); exists {
+			var linkTarget string
+			linkTarget, err = file.parent.publishedStorage.ReadLink(oldIndexPath)
+			if err == nil {
+				// If we managed to resolve the link target: delete it. This is the
+				// oldest physical index file we no longer need. Once we drop our
+				// old symlink we'll essentially forget about it existing at all.
+				file.parent.publishedStorage.Remove(linkTarget)
+			}
+			file.parent.publishedStorage.Remove(oldIndexPath)
+		}
+		file.parent.publishedStorage.RenameFile(indexPath, oldIndexPath)
+	}
+
+	// create symlink
+	err = file.parent.publishedStorage.SymLink(filepath.Join(dst, sum), filepath.Join(dst, indexfile))
+	if err != nil {
+		return fmt.Errorf("Acquire-By-Hash: error creating symlink %s: %s", filepath.Join(dst, indexfile), err)
+	}
+	return nil
+}
+
+func newIndexFiles(publishedStorage aptly.PublishedStorage, basePath, tempDir, suffix string, acquireByHash bool) *indexFiles {
 	return &indexFiles{
 		publishedStorage: publishedStorage,
 		basePath:         basePath,
@@ -146,16 +226,20 @@ func newIndexFiles(publishedStorage aptly.PublishedStorage, basePath, tempDir, s
 		tempDir:          tempDir,
 		suffix:           suffix,
 		indexes:          make(map[string]*indexFile),
+		acquireByHash:    acquireByHash,
 	}
 }
 
 func (files *indexFiles) PackageIndex(component, arch string, udeb bool) *indexFile {
-	key := fmt.Sprintf("pi-%s-%s-%s", component, arch, udeb)
+	if arch == ArchitectureSource {
+		udeb = false
+	}
+	key := fmt.Sprintf("pi-%s-%s-%v", component, arch, udeb)
 	file, ok := files.indexes[key]
 	if !ok {
 		var relativePath string
 
-		if arch == "source" {
+		if arch == ArchitectureSource {
 			relativePath = filepath.Join(component, "source", "Sources")
 		} else {
 			if udeb {
@@ -166,11 +250,12 @@ func (files *indexFiles) PackageIndex(component, arch string, udeb bool) *indexF
 		}
 
 		file = &indexFile{
-			parent:       files,
-			discardable:  false,
-			compressable: true,
-			signable:     false,
-			relativePath: relativePath,
+			parent:        files,
+			discardable:   false,
+			compressable:  true,
+			signable:      false,
+			acquireByHash: files.acquireByHash,
+			relativePath:  relativePath,
 		}
 
 		files.indexes[key] = file
@@ -180,12 +265,15 @@ func (files *indexFiles) PackageIndex(component, arch string, udeb bool) *indexF
 }
 
 func (files *indexFiles) ReleaseIndex(component, arch string, udeb bool) *indexFile {
-	key := fmt.Sprintf("ri-%s-%s-%s", component, arch, udeb)
+	if arch == ArchitectureSource {
+		udeb = false
+	}
+	key := fmt.Sprintf("ri-%s-%s-%v", component, arch, udeb)
 	file, ok := files.indexes[key]
 	if !ok {
 		var relativePath string
 
-		if arch == "source" {
+		if arch == ArchitectureSource {
 			relativePath = filepath.Join(component, "source", "Release")
 		} else {
 			if udeb {
@@ -196,11 +284,43 @@ func (files *indexFiles) ReleaseIndex(component, arch string, udeb bool) *indexF
 		}
 
 		file = &indexFile{
-			parent:       files,
-			discardable:  udeb,
-			compressable: false,
-			signable:     false,
-			relativePath: relativePath,
+			parent:        files,
+			discardable:   udeb,
+			compressable:  false,
+			signable:      false,
+			acquireByHash: files.acquireByHash,
+			relativePath:  relativePath,
+		}
+
+		files.indexes[key] = file
+	}
+
+	return file
+}
+
+func (files *indexFiles) ContentsIndex(component, arch string, udeb bool) *indexFile {
+	if arch == ArchitectureSource {
+		udeb = false
+	}
+	key := fmt.Sprintf("ci-%s-%s-%v", component, arch, udeb)
+	file, ok := files.indexes[key]
+	if !ok {
+		var relativePath string
+
+		if udeb {
+			relativePath = filepath.Join(component, fmt.Sprintf("Contents-udeb-%s", arch))
+		} else {
+			relativePath = filepath.Join(component, fmt.Sprintf("Contents-%s", arch))
+		}
+
+		file = &indexFile{
+			parent:        files,
+			discardable:   true,
+			compressable:  true,
+			onlyGzip:      true,
+			signable:      false,
+			acquireByHash: files.acquireByHash,
+			relativePath:  relativePath,
 		}
 
 		files.indexes[key] = file

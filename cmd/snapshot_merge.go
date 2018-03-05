@@ -2,9 +2,10 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
+
 	"github.com/smira/aptly/deb"
 	"github.com/smira/commander"
-	"strings"
 )
 
 func aptlySnapshotMerge(cmd *commander.Command, args []string) error {
@@ -39,7 +40,7 @@ func aptlySnapshotMerge(cmd *commander.Command, args []string) error {
 
 	result := sources[0].RefList()
 	for i := 1; i < len(sources); i++ {
-		result = result.Merge(sources[i].RefList(), overrideMatching)
+		result = result.Merge(sources[i].RefList(), overrideMatching, false)
 	}
 
 	if latest {

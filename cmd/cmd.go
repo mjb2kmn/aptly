@@ -2,13 +2,22 @@
 package cmd
 
 import (
+	"bytes"
 	"fmt"
+	"os"
+	"text/template"
+	"time"
+
 	"github.com/smira/aptly/aptly"
 	"github.com/smira/aptly/deb"
 	"github.com/smira/commander"
 	"github.com/smira/flag"
-	"os"
-	"time"
+)
+
+// Various command flags/UI things
+const (
+	Yes = "yes"
+	No  = "no"
 )
 
 // ListPackagesRefList shows list of packages in PackageRefList
@@ -19,19 +28,41 @@ func ListPackagesRefList(reflist *deb.PackageRefList) (err error) {
 		return
 	}
 
-	err = reflist.ForEach(func(key []byte) error {
-		p, err2 := context.CollectionFactory().PackageCollection().ByKey(key)
-		if err2 != nil {
-			return err2
-		}
-		fmt.Printf("  %s\n", p)
-		return nil
-	})
+	list, err := deb.NewPackageListFromRefList(reflist, context.CollectionFactory().PackageCollection(), context.Progress())
 	if err != nil {
 		return fmt.Errorf("unable to load packages: %s", err)
 	}
 
-	return
+	return PrintPackageList(list, "", "  ")
+
+}
+
+// PrintPackageList shows package list with specified format or default representation
+func PrintPackageList(result *deb.PackageList, format, prefix string) error {
+	result.PrepareIndex()
+
+	if format == "" {
+		return result.ForEachIndexed(func(p *deb.Package) error {
+			context.Progress().Printf(prefix+"%s\n", p)
+			return nil
+		})
+	}
+
+	formatTemplate, err := template.New("format").Parse(format)
+	if err != nil {
+		return fmt.Errorf("error parsing -format template: %s", err)
+	}
+
+	return result.ForEachIndexed(func(p *deb.Package) error {
+		b := &bytes.Buffer{}
+		err = formatTemplate.Execute(b, p.ExtendedStanza())
+		if err != nil {
+			return fmt.Errorf("error applying template: %s", err)
+		}
+		context.Progress().Printf(prefix+"%s\n", b.String())
+		return nil
+	})
+
 }
 
 // LookupOption checks boolean flag with default (usually config) and command-line
@@ -80,12 +111,15 @@ package environment to new version.`,
 		},
 	}
 
+	cmd.Flag.Int("db-open-attempts", 10, "number of attempts to open DB if it's locked by other instance")
 	cmd.Flag.Bool("dep-follow-suggests", false, "when processing dependencies, follow Suggests")
 	cmd.Flag.Bool("dep-follow-source", false, "when processing dependencies, follow from binary to Source packages")
 	cmd.Flag.Bool("dep-follow-recommends", false, "when processing dependencies, follow Recommends")
-	cmd.Flag.Bool("dep-follow-all-variants", false, "when processing dependencies, follow a & b if depdency is 'a|b'")
+	cmd.Flag.Bool("dep-follow-all-variants", false, "when processing dependencies, follow a & b if dependency is 'a|b'")
+	cmd.Flag.Bool("dep-verbose-resolve", false, "when processing dependencies, print detailed logs")
 	cmd.Flag.String("architectures", "", "list of architectures to consider during (comma-separated), default to all available")
 	cmd.Flag.String("config", "", "location of configuration file (default locations are /etc/aptly.conf, ~/.aptly.conf)")
+	cmd.Flag.String("gpg-provider", "", "PGP implementation (\"gpg\" for external gpg or \"internal\" for Go internal implementation)")
 
 	if aptly.EnableDebug {
 		cmd.Flag.String("cpuprofile", "", "write cpu profile to file")

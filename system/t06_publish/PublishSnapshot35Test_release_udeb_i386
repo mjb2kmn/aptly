@@ -1,5 +1,5 @@
-Origin: . squeeze
-Label: . squeeze
+Origin: Debian
+Label: . wheezy
+Archive: wheezy
 Architecture: i386
-Archive: squeeze
 Component: main

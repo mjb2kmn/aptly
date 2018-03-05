@@ -2,11 +2,12 @@ package query
 
 import (
 	"fmt"
-	"github.com/smira/aptly/deb"
 	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/smira/aptly/deb"
 )
 
 type parser struct {
@@ -134,7 +135,7 @@ func (p *parser) D() deb.PackageQuery {
 	operator, value := p.Condition()
 
 	r, _ := utf8.DecodeRuneInString(field)
-	if strings.HasPrefix(field, "$") || unicode.IsUpper(r) {
+	if strings.HasPrefix(field, "$") || (unicode.IsUpper(r) && !strings.ContainsRune(field, '_')) {
 		// special field or regular field
 		q := &deb.FieldQuery{Field: field, Relation: operatorToRelation(operator), Value: value}
 		if q.Relation == deb.VersionRegexp {

@@ -1,16 +1,18 @@
 package deb
 
 import (
-	"github.com/smira/aptly/aptly"
-	"github.com/smira/aptly/utils"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/smira/aptly/aptly"
+	"github.com/smira/aptly/pgp"
+	"github.com/smira/aptly/utils"
 )
 
 // CollectPackageFiles walks filesystem collecting all candidates for package files
-func CollectPackageFiles(locations []string, reporter aptly.ResultReporter) (packageFiles, failedFiles []string, err error) {
+func CollectPackageFiles(locations []string, reporter aptly.ResultReporter) (packageFiles, otherFiles, failedFiles []string) {
 	for _, location := range locations {
 		info, err2 := os.Stat(location)
 		if err2 != nil {
@@ -28,16 +30,26 @@ func CollectPackageFiles(locations []string, reporter aptly.ResultReporter) (pac
 				}
 
 				if strings.HasSuffix(info.Name(), ".deb") || strings.HasSuffix(info.Name(), ".udeb") ||
-					strings.HasSuffix(info.Name(), ".dsc") {
+					strings.HasSuffix(info.Name(), ".dsc") || strings.HasSuffix(info.Name(), ".ddeb") {
 					packageFiles = append(packageFiles, path)
+				} else if strings.HasSuffix(info.Name(), ".buildinfo") {
+					otherFiles = append(otherFiles, path)
 				}
 
 				return nil
 			})
+
+			if err2 != nil {
+				reporter.Warning("Unable to process %s: %s", location, err2)
+				failedFiles = append(failedFiles, location)
+				continue
+			}
 		} else {
 			if strings.HasSuffix(info.Name(), ".deb") || strings.HasSuffix(info.Name(), ".udeb") ||
-				strings.HasSuffix(info.Name(), ".dsc") {
+				strings.HasSuffix(info.Name(), ".dsc") || strings.HasSuffix(info.Name(), ".ddeb") {
 				packageFiles = append(packageFiles, location)
+			} else if strings.HasSuffix(info.Name(), ".buildinfo") {
+				otherFiles = append(otherFiles, location)
 			} else {
 				reporter.Warning("Unknown file extension: %s", location)
 				failedFiles = append(failedFiles, location)
@@ -52,8 +64,9 @@ func CollectPackageFiles(locations []string, reporter aptly.ResultReporter) (pac
 }
 
 // ImportPackageFiles imports files into local repository
-func ImportPackageFiles(list *PackageList, packageFiles []string, forceReplace bool, verifier utils.Verifier,
-	pool aptly.PackagePool, collection *PackageCollection, reporter aptly.ResultReporter) (processedFiles []string, failedFiles []string, err error) {
+func ImportPackageFiles(list *PackageList, packageFiles []string, forceReplace bool, verifier pgp.Verifier,
+	pool aptly.PackagePool, collection *PackageCollection, reporter aptly.ResultReporter, restriction PackageQuery,
+	checksumStorage aptly.ChecksumStorage) (processedFiles []string, failedFiles []string, err error) {
 	if forceReplace {
 		list.PrepareIndex()
 	}
@@ -91,19 +104,42 @@ func ImportPackageFiles(list *PackageList, packageFiles []string, forceReplace b
 			continue
 		}
 
+		if p.Name == "" {
+			reporter.Warning("Empty package name on %s", file)
+			failedFiles = append(failedFiles, file)
+			continue
+		}
+
+		if p.Version == "" {
+			reporter.Warning("Empty version on %s", file)
+			failedFiles = append(failedFiles, file)
+			continue
+		}
+
+		if p.Architecture == "" {
+			reporter.Warning("Empty architecture on %s", file)
+			failedFiles = append(failedFiles, file)
+			continue
+		}
+
+		var files PackageFiles
+
+		if isSourcePackage {
+			files = p.Files()
+		}
+
 		var checksums utils.ChecksumInfo
 		checksums, err = utils.ChecksumsForFile(file)
 		if err != nil {
 			return nil, nil, err
 		}
 
-		if isSourcePackage {
-			p.UpdateFiles(append(p.Files(), PackageFile{Filename: filepath.Base(file), Checksums: checksums}))
-		} else {
-			p.UpdateFiles([]PackageFile{PackageFile{Filename: filepath.Base(file), Checksums: checksums}})
+		mainPackageFile := PackageFile{
+			Filename:  filepath.Base(file),
+			Checksums: checksums,
 		}
 
-		err = pool.Import(file, checksums.MD5)
+		mainPackageFile.PoolPath, err = pool.Import(file, mainPackageFile.Filename, &mainPackageFile.Checksums, false, checksumStorage)
 		if err != nil {
 			reporter.Warning("Unable to import file %s into pool: %s", file, err)
 			failedFiles = append(failedFiles, file)
@@ -112,23 +148,48 @@ func ImportPackageFiles(list *PackageList, packageFiles []string, forceReplace b
 
 		candidateProcessedFiles = append(candidateProcessedFiles, file)
 
-		// go over all files, except for the last one (.dsc/.deb itself)
-		for _, f := range p.Files() {
-			if filepath.Base(f.Filename) == filepath.Base(file) {
-				continue
+		// go over all the other files
+		for i := range files {
+			sourceFile := filepath.Join(filepath.Dir(file), filepath.Base(files[i].Filename))
+
+			_, err = os.Stat(sourceFile)
+			if err == nil {
+				files[i].PoolPath, err = pool.Import(sourceFile, files[i].Filename, &files[i].Checksums, false, checksumStorage)
+				if err == nil {
+					candidateProcessedFiles = append(candidateProcessedFiles, sourceFile)
+				}
+			} else if os.IsNotExist(err) {
+				// if file is not present, try to find it in the pool
+				var (
+					err2  error
+					found bool
+				)
+
+				files[i].PoolPath, found, err2 = pool.Verify("", files[i].Filename, &files[i].Checksums, checksumStorage)
+				if err2 != nil {
+					err = err2
+				} else if found {
+					// clear error, file is already in the package pool
+					err = nil
+				}
 			}
-			sourceFile := filepath.Join(filepath.Dir(file), filepath.Base(f.Filename))
-			err = pool.Import(sourceFile, f.Checksums.MD5)
+
 			if err != nil {
 				reporter.Warning("Unable to import file %s into pool: %s", sourceFile, err)
 				failedFiles = append(failedFiles, file)
 				break
 			}
-
-			candidateProcessedFiles = append(candidateProcessedFiles, sourceFile)
 		}
 		if err != nil {
 			// some files haven't been imported
+			continue
+		}
+
+		p.UpdateFiles(append(files, mainPackageFile))
+
+		if restriction != nil && !restriction.Matches(p) {
+			reporter.Warning("%s has been ignored as it doesn't match restriction", p)
+			failedFiles = append(failedFiles, file)
 			continue
 		}
 
@@ -140,7 +201,7 @@ func ImportPackageFiles(list *PackageList, packageFiles []string, forceReplace b
 		}
 
 		if forceReplace {
-			conflictingPackages := list.Search(Dependency{Pkg: p.Name, Version: p.Version, Architecture: p.Architecture}, true)
+			conflictingPackages := list.Search(Dependency{Pkg: p.Name, Version: p.Version, Relation: VersionEqual, Architecture: p.Architecture}, true)
 			for _, cp := range conflictingPackages {
 				reporter.Removed("%s removed due to conflict with package being added", cp)
 				list.Remove(cp)

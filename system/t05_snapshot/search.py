@@ -6,7 +6,6 @@ class SearchSnapshot1Test(BaseTest):
     search snapshot: regular search
     """
     fixtureDB = True
-    outputMatchPrepare = lambda _, s: "\n".join(sorted(s.split("\n")))
     fixtureCmds = ["aptly snapshot create wheezy-main from mirror wheezy-main"]
     runCmd = "aptly snapshot search wheezy-main '$$Architecture (i386), Name (% *-dev)'"
 
@@ -35,5 +34,32 @@ class SearchSnapshot4Test(BaseTest):
     """
     fixtureDB = True
     fixtureCmds = ["aptly snapshot create wheezy-main from mirror wheezy-main"]
-    outputMatchPrepare = lambda _, s: "\n".join(sorted(s.split("\n")))
     runCmd = "aptly snapshot search -with-deps wheezy-main 'Name (nginx)'"
+
+
+class SearchSnapshot5Test(BaseTest):
+    """
+    search snapshot: no results
+    """
+    fixtureDB = True
+    fixtureCmds = ["aptly snapshot create wheezy-main from mirror wheezy-main"]
+    runCmd = "aptly snapshot search -with-deps wheezy-main 'Name (no-such-package)'"
+    expectedCode = 1
+
+
+class SearchSnapshot6Test(BaseTest):
+    """
+    search snapshot: with format
+    """
+    fixtureDB = True
+    fixtureCmds = ["aptly snapshot create wheezy-main from mirror wheezy-main"]
+    runCmd = "aptly snapshot search -format='{{.Package}}#{{.Version}}' wheezy-main '$$Architecture (i386), Name (% *-dev)'"
+
+
+class SearchSnapshot7Test(BaseTest):
+    """
+    search snapshot: without query
+    """
+    fixtureDB = True
+    fixtureCmds = ["aptly snapshot create wheezy-main from mirror wheezy-main"]
+    runCmd = "aptly snapshot search -format='{{.Package}}#{{.Version}}' wheezy-main"

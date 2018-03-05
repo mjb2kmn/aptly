@@ -7,6 +7,16 @@ import (
 	"strings"
 )
 
+// PackageLike is something like Package :) To be refined later
+type PackageLike interface {
+	GetField(string) string
+	MatchesDependency(Dependency) bool
+	MatchesArchitecture(string) bool
+	GetName() string
+	GetVersion() string
+	GetArchitecture() string
+}
+
 // PackageCatalog is abstraction on top of PackageCollection and PackageList
 type PackageCatalog interface {
 	Scan(q PackageQuery) (result *PackageList)
@@ -18,7 +28,7 @@ type PackageCatalog interface {
 // PackageQuery is interface of predicate on Package
 type PackageQuery interface {
 	// Matches calculates match of condition against package
-	Matches(pkg *Package) bool
+	Matches(pkg PackageLike) bool
 	// Fast returns if search strategy is possible for this query
 	Fast(list PackageCatalog) bool
 	// Query performs search on package list
@@ -62,8 +72,11 @@ type DependencyQuery struct {
 	Dep Dependency
 }
 
+// MatchAllQuery is query that matches all the packages
+type MatchAllQuery struct{}
+
 // Matches if any of L, R matches
-func (q *OrQuery) Matches(pkg *Package) bool {
+func (q *OrQuery) Matches(pkg PackageLike) bool {
 	return q.L.Matches(pkg) || q.R.Matches(pkg)
 }
 
@@ -89,7 +102,7 @@ func (q *OrQuery) String() string {
 }
 
 // Matches if both of L, R matches
-func (q *AndQuery) Matches(pkg *Package) bool {
+func (q *AndQuery) Matches(pkg PackageLike) bool {
 	return q.L.Matches(pkg) && q.R.Matches(pkg)
 }
 
@@ -120,7 +133,7 @@ func (q *AndQuery) String() string {
 }
 
 // Matches if not matches
-func (q *NotQuery) Matches(pkg *Package) bool {
+func (q *NotQuery) Matches(pkg PackageLike) bool {
 	return !q.Q.Matches(pkg)
 }
 
@@ -141,9 +154,9 @@ func (q *NotQuery) String() string {
 }
 
 // Matches on generic field
-func (q *FieldQuery) Matches(pkg *Package) bool {
+func (q *FieldQuery) Matches(pkg PackageLike) bool {
 	if q.Field == "$Version" {
-		return pkg.MatchesDependency(Dependency{Pkg: pkg.Name, Relation: q.Relation, Version: q.Value, Regexp: q.Regexp})
+		return pkg.MatchesDependency(Dependency{Pkg: pkg.GetName(), Relation: q.Relation, Version: q.Value, Regexp: q.Regexp})
 	}
 	if q.Field == "$Architecture" && q.Relation == VersionEqual {
 		return pkg.MatchesArchitecture(q.Value)
@@ -191,7 +204,7 @@ func (q *FieldQuery) Fast(list PackageCatalog) bool {
 // String interface
 func (q *FieldQuery) String() string {
 	escape := func(val string) string {
-		if strings.IndexAny(val, "()|,!{} \t\n") != -1 {
+		if strings.ContainsAny(val, "()|,!{} \t\n") {
 			return "'" + strings.Replace(strings.Replace(val, "\\", "\\\\", -1), "'", "\\'", -1) + "'"
 		}
 		return val
@@ -218,7 +231,7 @@ func (q *FieldQuery) String() string {
 }
 
 // Matches on dependency condition
-func (q *DependencyQuery) Matches(pkg *Package) bool {
+func (q *DependencyQuery) Matches(pkg PackageLike) bool {
 	return pkg.MatchesDependency(q.Dep)
 }
 
@@ -247,8 +260,8 @@ func (q *DependencyQuery) String() string {
 }
 
 // Matches on specific properties
-func (q *PkgQuery) Matches(pkg *Package) bool {
-	return pkg.Name == q.Pkg && pkg.Version == q.Version && pkg.Architecture == q.Arch
+func (q *PkgQuery) Matches(pkg PackageLike) bool {
+	return pkg.GetName() == q.Pkg && pkg.GetVersion() == q.Version && pkg.GetArchitecture() == q.Arch
 }
 
 // Fast is always true for package query
@@ -264,4 +277,24 @@ func (q *PkgQuery) Query(list PackageCatalog) (result *PackageList) {
 // String interface
 func (q *PkgQuery) String() string {
 	return fmt.Sprintf("%s_%s_%s", q.Pkg, q.Version, q.Arch)
+}
+
+// Matches on specific properties
+func (q *MatchAllQuery) Matches(pkg PackageLike) bool {
+	return true
+}
+
+// Fast is always true for match all query
+func (q *MatchAllQuery) Fast(list PackageCatalog) bool {
+	return true
+}
+
+// Query looks up specific package
+func (q *MatchAllQuery) Query(list PackageCatalog) (result *PackageList) {
+	return list.Scan(q)
+}
+
+// String interface
+func (q *MatchAllQuery) String() string {
+	return ""
 }

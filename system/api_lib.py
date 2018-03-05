@@ -27,7 +27,7 @@ class APITest(BaseTest):
         if APITest.aptly_server is None:
             super(APITest, self).prepare()
 
-            APITest.aptly_server = self._start_process("aptly api serve -listen=%s" % (self.base_url),)
+            APITest.aptly_server = self._start_process("aptly api serve -no-lock -listen=%s" % (self.base_url),)
             time.sleep(1)
 
         if os.path.exists(os.path.join(os.environ["HOME"], ".aptly", "upload")):
@@ -42,15 +42,23 @@ class APITest(BaseTest):
     def post(self, uri, *args, **kwargs):
         if "json" in kwargs:
             kwargs["data"] = json.dumps(kwargs.pop("json"))
-            if not "headers" in kwargs:
+            if "headers" not in kwargs:
                 kwargs["headers"] = {}
             kwargs["headers"]["Content-Type"] = "application/json"
         return requests.post("http://%s%s" % (self.base_url, uri), *args, **kwargs)
 
+    def put(self, uri, *args, **kwargs):
+        if "json" in kwargs:
+            kwargs["data"] = json.dumps(kwargs.pop("json"))
+            if "headers" not in kwargs:
+                kwargs["headers"] = {}
+            kwargs["headers"]["Content-Type"] = "application/json"
+        return requests.put("http://%s%s" % (self.base_url, uri), *args, **kwargs)
+
     def delete(self, uri, *args, **kwargs):
         if "json" in kwargs:
             kwargs["data"] = json.dumps(kwargs.pop("json"))
-            if not "headers" in kwargs:
+            if "headers" not in kwargs:
                 kwargs["headers"] = {}
             kwargs["headers"]["Content-Type"] = "application/json"
         return requests.delete("http://%s%s" % (self.base_url, uri), *args, **kwargs)

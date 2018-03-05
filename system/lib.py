@@ -13,7 +13,6 @@ import shutil
 import string
 import threading
 import urllib
-#import time
 import pprint
 import SocketServer
 import SimpleHTTPServer
@@ -83,6 +82,12 @@ class BaseTest(object):
 
     fixtureDBDir = os.path.join(os.environ["HOME"], "aptly-fixture-db")
     fixturePoolDir = os.path.join(os.environ["HOME"], "aptly-fixture-pool")
+    fixtureGpgKeys = ["debian-archive-keyring.gpg",
+                      "launchpad.key",
+                      "flat.key",
+                      "pagerduty.key",
+                      "nvidia.key",
+                      "jenkins.key"]
 
     outputMatchPrepare = None
 
@@ -118,30 +123,23 @@ class BaseTest(object):
 
     def prepare_fixture(self):
         if self.fixturePool:
-            #start = time.time()
             os.makedirs(os.path.join(os.environ["HOME"], ".aptly"), 0755)
             os.symlink(self.fixturePoolDir, os.path.join(os.environ["HOME"], ".aptly", "pool"))
-            #print "FIXTURE POOL: %.2f" % (time.time()-start)
 
         if self.fixturePoolCopy:
             os.makedirs(os.path.join(os.environ["HOME"], ".aptly"), 0755)
             shutil.copytree(self.fixturePoolDir, os.path.join(os.environ["HOME"], ".aptly", "pool"), ignore=shutil.ignore_patterns(".git"))
 
         if self.fixtureDB:
-            #start = time.time()
             shutil.copytree(self.fixtureDBDir, os.path.join(os.environ["HOME"], ".aptly", "db"))
-            #print "FIXTURE DB: %.2f" % (time.time()-start)
 
         if self.fixtureWebServer:
             self.webServerUrl = self.start_webserver(os.path.join(os.path.dirname(inspect.getsourcefile(self.__class__)),
                                                      self.fixtureWebServer))
 
         if self.fixtureGpg:
-            self.run_cmd(["gpg", "--no-default-keyring", "--trust-model", "always", "--batch", "--keyring", "aptlytest.gpg", "--import",
-                          os.path.join(os.path.dirname(inspect.getsourcefile(BaseTest)), "files", "debian-archive-keyring.gpg"),
-                          os.path.join(os.path.dirname(inspect.getsourcefile(BaseTest)), "files", "launchpad.key"),
-                          os.path.join(os.path.dirname(inspect.getsourcefile(BaseTest)), "files", "flat.key"),
-                          os.path.join(os.path.dirname(inspect.getsourcefile(BaseTest)), "files", "jenkins.key")])
+            self.run_cmd(["gpg", "--no-default-keyring", "--trust-model", "always", "--batch", "--keyring", "aptlytest.gpg", "--import"] +
+                         [os.path.join(os.path.dirname(inspect.getsourcefile(BaseTest)), "files", key) for key in self.fixtureGpgKeys])
 
         if hasattr(self, "fixtureCmds"):
             for cmd in self.fixtureCmds:
@@ -154,6 +152,7 @@ class BaseTest(object):
         if not hasattr(command, "__iter__"):
             params = {
                 'files': os.path.join(os.path.dirname(inspect.getsourcefile(BaseTest)), "files"),
+                'changes': os.path.join(os.path.dirname(inspect.getsourcefile(BaseTest)), "changes"),
                 'udebs': os.path.join(os.path.dirname(inspect.getsourcefile(BaseTest)), "udebs"),
                 'testfiles': os.path.join(os.path.dirname(inspect.getsourcefile(self.__class__)), self.__class__.__name__),
                 'aptlyroot': os.path.join(os.environ["HOME"], ".aptly"),
@@ -171,10 +170,8 @@ class BaseTest(object):
 
     def run_cmd(self, command, expected_code=0):
         try:
-            #start = time.time()
             proc = self._start_process(command, stdout=subprocess.PIPE)
             output, _ = proc.communicate()
-            #print "CMD %s: %.2f" % (" ".join(command), time.time()-start)
             if proc.returncode != expected_code:
                 raise Exception("exit code %d != %d (output: %s)" % (proc.returncode, expected_code, output))
             return output
@@ -199,7 +196,7 @@ class BaseTest(object):
     def check_output(self):
         try:
             self.verify_match(self.get_gold(), self.output, match_prepare=self.outputMatchPrepare)
-        except:
+        except:  # noqa: E722
             if self.captureResults:
                 if self.outputMatchPrepare is not None:
                     self.output = self.outputMatchPrepare(self.output)
@@ -212,7 +209,7 @@ class BaseTest(object):
         output = self.run_cmd(command, expected_code=expected_code)
         try:
             self.verify_match(self.get_gold(gold_name), output, match_prepare)
-        except:
+        except:  # noqa: E722
             if self.captureResults:
                 if match_prepare is not None:
                     output = match_prepare(output)
@@ -233,8 +230,10 @@ class BaseTest(object):
         try:
 
             self.verify_match(self.get_gold(gold_name), contents, match_prepare=match_prepare)
-        except:
+        except:  # noqa: E722
             if self.captureResults:
+                if match_prepare is not None:
+                    contents = match_prepare(contents)
                 with open(self.get_gold_filename(gold_name), "w") as f:
                     f.write(contents)
             else:
@@ -244,7 +243,7 @@ class BaseTest(object):
         contents = open(self.checkedFile, "r").read()
         try:
             self.verify_match(self.get_gold(), contents)
-        except:
+        except:  # noqa: E722
             if self.captureResults:
                 with open(self.get_gold_filename(), "w") as f:
                     f.write(contents)
@@ -266,6 +265,28 @@ class BaseTest(object):
     def check_equal(self, a, b):
         if a != b:
             self.verify_match(a, b, match_prepare=pprint.pformat)
+
+    def check_ge(self, a, b):
+        if not a >= b:
+            raise Exception("%s is not greater or equal to %s" % (a, b))
+
+    def check_gt(self, a, b):
+        if not a > b:
+            raise Exception("%s is not greater to %s" % (a, b))
+
+    def check_in(self, item, l):
+        if item not in l:
+            raise Exception("item %r not in %r", item, l)
+
+    def check_subset(self, a, b):
+        diff = ''
+        for k, v in a.items():
+            if k not in b:
+                diff += "unexpected key '%s'\n" % (k,)
+            elif b[k] != v:
+                diff += "wrong value '%s' for key '%s', expected '%s'\n" % (v, k, b[k])
+        if diff:
+            raise Exception("content doesn't match:\n" + diff)
 
     def verify_match(self, a, b, match_prepare=None):
         if match_prepare is not None:

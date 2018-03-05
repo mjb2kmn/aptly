@@ -2,12 +2,13 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
+
 	"github.com/smira/aptly/aptly"
 	"github.com/smira/aptly/deb"
 	"github.com/smira/aptly/utils"
 	"github.com/smira/commander"
 	"github.com/smira/flag"
-	"strings"
 )
 
 func aptlyPublishSnapshotOrRepo(cmd *commander.Command, args []string) error {
@@ -34,7 +35,7 @@ func aptlyPublishSnapshotOrRepo(cmd *commander.Command, args []string) error {
 		message string
 	)
 
-	if cmd.Name() == "snapshot" {
+	if cmd.Name() == "snapshot" { // nolint: goconst
 		var (
 			snapshot     *deb.Snapshot
 			emptyWarning = false
@@ -70,7 +71,7 @@ func aptlyPublishSnapshotOrRepo(cmd *commander.Command, args []string) error {
 		if emptyWarning {
 			context.Progress().Printf("Warning: publishing from empty source, architectures list should be complete, it can't be changed after publishing (use -architectures flag)\n")
 		}
-	} else if cmd.Name() == "repo" {
+	} else if cmd.Name() == "repo" { // nolint: goconst
 		var (
 			localRepo    *deb.LocalRepo
 			emptyWarning = false
@@ -111,13 +112,34 @@ func aptlyPublishSnapshotOrRepo(cmd *commander.Command, args []string) error {
 	}
 
 	distribution := context.Flags().Lookup("distribution").Value.String()
+	origin := context.Flags().Lookup("origin").Value.String()
+	notAutomatic := context.Flags().Lookup("notautomatic").Value.String()
+	butAutomaticUpgrades := context.Flags().Lookup("butautomaticupgrades").Value.String()
 
 	published, err := deb.NewPublishedRepo(storage, prefix, distribution, context.ArchitecturesList(), components, sources, context.CollectionFactory())
 	if err != nil {
 		return fmt.Errorf("unable to publish: %s", err)
 	}
-	published.Origin = cmd.Flag.Lookup("origin").Value.String()
-	published.Label = cmd.Flag.Lookup("label").Value.String()
+	if origin != "" {
+		published.Origin = origin
+	}
+	if notAutomatic != "" {
+		published.NotAutomatic = notAutomatic
+	}
+	if butAutomaticUpgrades != "" {
+		published.ButAutomaticUpgrades = butAutomaticUpgrades
+	}
+	published.Label = context.Flags().Lookup("label").Value.String()
+
+	published.SkipContents = context.Config().SkipContentsPublishing
+
+	if context.Flags().IsSet("skip-contents") {
+		published.SkipContents = context.Flags().Lookup("skip-contents").Value.Get().(bool)
+	}
+
+	if context.Flags().IsSet("acquire-by-hash") {
+		published.AcquireByHash = context.Flags().Lookup("acquire-by-hash").Value.Get().(bool)
+	}
 
 	duplicate := context.CollectionFactory().PublishedRepoCollection().CheckDuplicate(published)
 	if duplicate != nil {
@@ -156,14 +178,14 @@ func aptlyPublishSnapshotOrRepo(cmd *commander.Command, args []string) error {
 
 	context.Progress().Printf("\n%s been successfully published.\n", message)
 
-	if localStorage, ok := context.GetPublishedStorage(storage).(aptly.LocalPublishedStorage); ok {
+	if localStorage, ok := context.GetPublishedStorage(storage).(aptly.FileSystemPublishedStorage); ok {
 		context.Progress().Printf("Please setup your webserver to serve directory '%s' with autoindexing.\n",
 			localStorage.PublicPath())
 	}
 
 	context.Progress().Printf("Now you can add following line to apt sources:\n")
 	context.Progress().Printf("  deb http://your-server/%s %s %s\n", prefix, distribution, repoComponents)
-	if utils.StrSliceHasItem(published.Architectures, "source") {
+	if utils.StrSliceHasItem(published.Architectures, deb.ArchitectureSource) {
 		context.Progress().Printf("  deb-src http://your-server/%s %s %s\n", prefix, distribution, repoComponents)
 	}
 	context.Progress().Printf("Don't forget to add your GPG key to apt with apt-key.\n")
@@ -203,9 +225,13 @@ Example:
 	cmd.Flag.String("passphrase-file", "", "GPG passhprase-file for the key (warning: could be insecure)")
 	cmd.Flag.Bool("batch", false, "run GPG with detached tty")
 	cmd.Flag.Bool("skip-signing", false, "don't sign Release files with GPG")
-	cmd.Flag.String("origin", "", "origin name to publish")
+	cmd.Flag.Bool("skip-contents", false, "don't generate Contents indexes")
+	cmd.Flag.String("origin", "", "overwrite origin name to publish")
+	cmd.Flag.String("notautomatic", "", "overwrite value for NotAutomatic field")
+	cmd.Flag.String("butautomaticupgrades", "", "overwrite value for ButAutomaticUpgrades field")
 	cmd.Flag.String("label", "", "label to publish")
 	cmd.Flag.Bool("force-overwrite", false, "overwrite files in package pool in case of mismatch")
+	cmd.Flag.Bool("acquire-by-hash", false, "provide index files by hash")
 
 	return cmd
 }

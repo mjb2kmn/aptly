@@ -2,10 +2,12 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
+
 	"github.com/smira/aptly/deb"
+	"github.com/smira/aptly/utils"
 	"github.com/smira/commander"
 	"github.com/smira/flag"
-	"strings"
 )
 
 func aptlyPublishSwitch(cmd *commander.Command, args []string) error {
@@ -42,7 +44,7 @@ func aptlyPublishSwitch(cmd *commander.Command, args []string) error {
 		return fmt.Errorf("unable to update: %s", err)
 	}
 
-	if published.SourceKind != "snapshot" {
+	if published.SourceKind != deb.SourceSnapshot {
 		return fmt.Errorf("unable to update: not a snapshot publish")
 	}
 
@@ -61,6 +63,10 @@ func aptlyPublishSwitch(cmd *commander.Command, args []string) error {
 	}
 
 	for i, component := range components {
+		if !utils.StrSliceHasItem(publishedComponents, component) {
+			return fmt.Errorf("unable to switch: component %s is not in published repository", component)
+		}
+
 		snapshot, err = context.CollectionFactory().SnapshotCollection().ByName(names[i])
 		if err != nil {
 			return fmt.Errorf("unable to switch: %s", err)
@@ -85,6 +91,10 @@ func aptlyPublishSwitch(cmd *commander.Command, args []string) error {
 			"the same package pool.\n")
 	}
 
+	if context.Flags().IsSet("skip-contents") {
+		published.SkipContents = context.Flags().Lookup("skip-contents").Value.Get().(bool)
+	}
+
 	err = published.Publish(context.PackagePool(), context, context.CollectionFactory(), signer, context.Progress(), forceOverwrite)
 	if err != nil {
 		return fmt.Errorf("unable to publish: %s", err)
@@ -95,10 +105,13 @@ func aptlyPublishSwitch(cmd *commander.Command, args []string) error {
 		return fmt.Errorf("unable to save to DB: %s", err)
 	}
 
-	err = context.CollectionFactory().PublishedRepoCollection().CleanupPrefixComponentFiles(published.Prefix, components,
-		context.GetPublishedStorage(storage), context.CollectionFactory(), context.Progress())
-	if err != nil {
-		return fmt.Errorf("unable to update: %s", err)
+	skipCleanup := context.Flags().Lookup("skip-cleanup").Value.Get().(bool)
+	if !skipCleanup {
+		err = context.CollectionFactory().PublishedRepoCollection().CleanupPrefixComponentFiles(published.Prefix, components,
+			context.GetPublishedStorage(storage), context.CollectionFactory(), context.Progress())
+		if err != nil {
+			return fmt.Errorf("unable to update: %s", err)
+		}
 	}
 
 	context.Progress().Printf("\nPublish for snapshot %s has been successfully switched to new snapshot.\n", published.String())
@@ -112,7 +125,7 @@ func makeCmdPublishSwitch() *commander.Command {
 		UsageLine: "switch <distribution> [[<endpoint>:]<prefix>] <new-snapshot>",
 		Short:     "update published repository by switching to new snapshot",
 		Long: `
-Command switches in-place published repository with new snapshot contents. All
+Command switches in-place published snapshots with new snapshot contents. All
 publishing parameters are preserved (architecture list, distribution,
 component).
 
@@ -120,11 +133,14 @@ For multiple component repositories, flag -component should be given with
 list of components to update. Corresponding snapshots should be given in the
 same order, e.g.:
 
-	aptly publish update -component=main,contrib wheezy wh-main wh-contrib
+	aptly publish switch -component=main,contrib wheezy wh-main wh-contrib
 
 Example:
 
-    $ aptly publish update wheezy ppa wheezy-7.5
+    $ aptly publish switch wheezy ppa wheezy-7.5
+
+This command would switch published repository (with one component) named ppa/wheezy
+(prefix ppa, dsitribution wheezy to new snapshot wheezy-7.5).
 `,
 		Flag: *flag.NewFlagSet("aptly-publish-switch", flag.ExitOnError),
 	}
@@ -135,8 +151,10 @@ Example:
 	cmd.Flag.String("passphrase-file", "", "GPG passhprase-file for the key (warning: could be insecure)")
 	cmd.Flag.Bool("batch", false, "run GPG with detached tty")
 	cmd.Flag.Bool("skip-signing", false, "don't sign Release files with GPG")
+	cmd.Flag.Bool("skip-contents", false, "don't generate Contents indexes")
 	cmd.Flag.String("component", "", "component names to update (for multi-component publishing, separate components with commas)")
 	cmd.Flag.Bool("force-overwrite", false, "overwrite files in package pool in case of mismatch")
+	cmd.Flag.Bool("skip-cleanup", false, "don't remove unreferenced files in prefix/component")
 
 	return cmd
 }
